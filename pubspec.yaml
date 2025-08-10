@@ -1,0 +1,18 @@
+name: dnd_dice_roller
+description: A D&D dice roller app with character sheet
+version: 1.0.1
+environment:
+  sdk: ">=2.12.0 <3.0.0"
+dependencies:
+  flutter:
+    sdk: flutter
+  provider: ^6.0.5
+  sqflite: ^2.3.3
+  path: ^1.9.0
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+flutter:
+  uses-material-design: true
+  assets:
+    - assets/dice_background.jpg
