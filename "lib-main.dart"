@@ -1,0 +1,447 @@
+import 'dart:math';
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:sqflite/sqflite.dart';
+import 'package:path/path.dart';
+
+// Database Helper
+class DatabaseHelper {
+  static final DatabaseHelper instance = DatabaseHelper._init();
+  static Database? _database;
+
+  DatabaseHelper._init();
+
+  Future<Database> get database async {
+    if (_database != null) return _database!;
+    _database = await _initDB('dnd.db');
+    return _database!;
+  }
+
+  Future<Database> _initDB(String filePath) async {
+    final dbPath = await getDatabasesPath();
+    final path = join(dbPath, filePath);
+
+    return await openDatabase(path, version: 1, onCreate: _createDB);
+  }
+
+  Future _createDB(Database db, int version) async {
+    await db.execute('''
+      CREATE TABLE characters (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT,
+        strength INTEGER,
+        dexterity INTEGER,
+        constitution INTEGER,
+        intelligence INTEGER,
+        wisdom INTEGER,
+        charisma INTEGER,
+        proficiency_bonus INTEGER
+      )
+    ''');
+    // For simplicity, skill proficiencies stored as JSON string; expand to separate table if needed
+    await db.execute('ALTER TABLE characters ADD COLUMN skill_proficiencies TEXT');
+  }
+
+  Future<void> insertOrUpdateCharacter(Map<String, dynamic> character) async {
+    final db = await instance.database;
+    final existing = await db.query('characters', limit: 1);
+    if (existing.isEmpty) {
+      await db.insert('characters', character);
+    } else {
+      await db.update('characters', character, where: 'id = ?', whereArgs: [existing.first['id']]);
+    }
+  }
+
+  Future<Map<String, dynamic>?> getCharacter() async {
+    final db = await instance.database;
+    final result = await db.query('characters', limit: 1);
+    return result.isNotEmpty ? result.first : null;
+  }
+}
+
+// Character Model
+class CharacterModel with ChangeNotifier {
+  String name = 'My Character';
+  int strength = 10;
+  int dexterity = 10;
+  int constitution = 10;
+  int intelligence = 10;
+  int wisdom = 10;
+  int charisma = 10;
+  int proficiencyBonus = 2;
+  Map<String, bool> skillProficiencies = {
+    'Athletics': false,
+    'Acrobatics': false,
+    'Perception': false,
+    // Add more skills as needed
+  };
+
+  int getModifier(int score) => (score - 10) ~/ 2;
+
+  void updateFromMap(Map<String, dynamic> data) {
+    name = data['name'] ?? name;
+    strength = data['strength'] ?? strength;
+    dexterity = data['dexterity'] ?? dexterity;
+    constitution = data['constitution'] ?? constitution;
+    intelligence = data['intelligence'] ?? intelligence;
+    wisdom = data['wisdom'] ?? wisdom;
+    charisma = data['charisma'] ?? charisma;
+    proficiencyBonus = data['proficiency_bonus'] ?? proficiencyBonus;
+    // Parse skill proficiencies if stored as JSON
+    notifyListeners();
+  }
+
+  Map<String, dynamic> toMap() {
+    return {
+      'name': name,
+      'strength': strength,
+      'dexterity': dexterity,
+      'constitution': constitution,
+      'intelligence': intelligence,
+      'wisdom': wisdom,
+      'charisma': charisma,
+      'proficiency_bonus': proficiencyBonus,
+      'skill_proficiencies': skillProficiencies.toString(), // Simplify for now
+    };
+  }
+
+  void updateStat(String stat, int value) {
+    switch (stat) {
+      case 'strength':
+        strength = value;
+        break;
+      case 'dexterity':
+        dexterity = value;
+        break;
+      // Add others
+    }
+    notifyListeners();
+  }
+
+  void toggleProficiency(String skill) {
+    skillProficiencies[skill] = !skillProficiencies[skill]!;
+    notifyListeners();
+  }
+}
+
+// Dice Roller Model (Updated)
+class DiceRollerModel with ChangeNotifier {
+  List<int> _results = [];
+  int _total = 0;
+  int _numDice = 1;
+  bool _isRolling = false;
+  String _rollType = 'Ability Check'; // 'Ability Check', 'Saving Throw', 'Attack Roll'
+  String _ability = 'Strength';
+  bool _isProficient = false;
+  String _advantage = 'Normal'; // 'Normal', 'Advantage', 'Disadvantage'
+  int _extraBonus = 0;
+
+  List<int> get results => _results;
+  int get total => _total;
+  int get numDice => _numDice;
+  bool get isRolling => _isRolling;
+
+  void setNumDice(int value) {
+    _numDice = value;
+    notifyListeners();
+  }
+
+  void setRollType(String type) {
+    _rollType = type;
+    notifyListeners();
+  }
+
+  void setAbility(String ability) {
+    _ability = ability;
+    notifyListeners();
+  }
+
+  void setProficient(bool value) {
+    _isProficient = value;
+    notifyListeners();
+  }
+
+  void setAdvantage(String value) {
+    _advantage = value;
+    notifyListeners();
+  }
+
+  void setExtraBonus(int value) {
+    _extraBonus = value;
+    notifyListeners();
+  }
+
+  Future<void> rollDice(int sides, CharacterModel character) async {
+    _isRolling = true;
+    notifyListeners();
+
+    await Future.delayed(const Duration(milliseconds: 500));
+
+    if (sides == 20) {
+      // d20 with modifiers
+      int mod = _getAbilityMod(character);
+      int prof = _isProficient ? character.proficiencyBonus : 0;
+      List<int> rolls = List.generate(_advantage == 'Normal' ? 1 : 2, (_) => Random().nextInt(20) + 1);
+      int roll = _advantage == 'Advantage' ? rolls.reduce(max) : _advantage == 'Disadvantage' ? rolls.reduce(min) : rolls[0];
+      _results = [roll];
+      _total = roll + mod + prof + _extraBonus;
+    } else {
+      // Other dice, simple with optional flat mod (e.g., for damage)
+      _results = List.generate(_numDice, (_) => Random().nextInt(sides) + 1);
+      _total = _results.reduce((a, b) => a + b) + _extraBonus; // Flat bonus for non-d20
+    }
+
+    _isRolling = false;
+    notifyListeners();
+  }
+
+  int _getAbilityMod(CharacterModel character) {
+    switch (_ability) {
+      case 'Strength':
+        return character.getModifier(character.strength);
+      case 'Dexterity':
+        return character.getModifier(character.dexterity);
+      // Add others
+      default:
+        return 0;
+    }
+  }
+}
+
+void main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  final dbHelper = DatabaseHelper.instance;
+  final characterData = await dbHelper.getCharacter();
+  
+  runApp(
+    MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) {
+          final model = CharacterModel();
+          if (characterData != null) model.updateFromMap(characterData);
+          return model;
+        }),
+        ChangeNotifierProvider(create: (_) => DiceRollerModel()),
+      ],
+      child: const DnDDiceRollerApp(),
+    ),
+  );
+}
+
+class DnDDiceRollerApp extends StatelessWidget {
+  const DnDDiceRollerApp({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return MaterialApp(
+      title: 'D&D Dice Roller with Character Sheet',
+      theme: ThemeData(primarySwatch: Colors.deepPurple),
+      home: const DiceRollerScreen(),
+    );
+  }
+}
+
+class DiceRollerScreen extends StatelessWidget {
+  const DiceRollerScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final diceModel = Provider.of<DiceRollerModel>(context);
+    final characterModel = Provider.of<CharacterModel>(context);
+    final diceTypes = [4, 6, 8, 10, 12, 20, 100];
+
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('D&D Dice Roller'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.person),
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const CharacterSheetScreen()),
+            ),
+          ),
+        ],
+      ),
+      body: Container(
+        decoration: const BoxDecoration(
+          image: DecorationImage(
+            image: AssetImage('assets/dice_background.jpg'),
+            fit: BoxFit.cover,
+            opacity: 0.3,
+          ),
+        ),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(16.0),
+          child: Column(
+            children: [
+              // Number of Dice
+              Row(
+                mainAxisAlignment: MainAxisAlignment.center,
+                children: [
+                  const Text('Number of Dice: ', style: TextStyle(fontSize: 18)),
+                  DropdownButton<int>(
+                    value: diceModel.numDice,
+                    items: List.generate(10, (index) => index + 1)
+                        .map((value) => DropdownMenuItem(value: value, child: Text(value.toString())))
+                        .toList(),
+                    onChanged: (value) => diceModel.setNumDice(value!),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              // Roll Type (for d20)
+              const Text('Roll Type:', style: TextStyle(fontSize: 18)),
+              DropdownButton<String>(
+                value: diceModel._rollType,
+                items: ['Ability Check', 'Saving Throw', 'Attack Roll']
+                    .map((type) => DropdownMenuItem(value: type, child: Text(type)))
+                    .toList(),
+                onChanged: (value) => diceModel.setRollType(value!),
+              ),
+              // Ability
+              const Text('Ability:', style: TextStyle(fontSize: 18)),
+              DropdownButton<String>(
+                value: diceModel._ability,
+                items: ['Strength', 'Dexterity', 'Constitution', 'Intelligence', 'Wisdom', 'Charisma']
+                    .map((ability) => DropdownMenuItem(value: ability, child: Text(ability)))
+                    .toList(),
+                onChanged: (value) => diceModel.setAbility(value!),
+              ),
+              // Proficient
+              Row(
+                children: [
+                  const Text('Proficient?', style: TextStyle(fontSize: 18)),
+                  Checkbox(
+                    value: diceModel._isProficient,
+                    onChanged: (value) => diceModel.setProficient(value!),
+                  ),
+                ],
+              ),
+              // Advantage/Disadvantage
+              const Text('Circumstance:', style: TextStyle(fontSize: 18)),
+              Row(
+                children: [
+                  ElevatedButton(
+                    onPressed: () => diceModel.setAdvantage('Normal'),
+                    child: const Text('Normal'),
+                  ),
+                  ElevatedButton(
+                    onPressed: () => diceModel.setAdvantage('Advantage'),
+                    child: const Text('Advantage'),
+                  ),
+                  ElevatedButton(
+                    onPressed: () => diceModel.setAdvantage('Disadvantage'),
+                    child: const Text('Disadvantage'),
+                  ),
+                ],
+              ),
+              // Extra Bonus
+              TextField(
+                keyboardType: TextInputType.number,
+                decoration: const InputDecoration(labelText: 'Extra Bonus (e.g., from situation)'),
+                onChanged: (value) => diceModel.setExtraBonus(int.tryParse(value) ?? 0),
+              ),
+              const SizedBox(height: 20),
+              // Dice Buttons
+              GridView.count(
+                shrinkWrap: true,
+                crossAxisCount: 2,
+                crossAxisSpacing: 10,
+                mainAxisSpacing: 10,
+                children: diceTypes.map((sides) {
+                  return ElevatedButton(
+                    onPressed: diceModel.isRolling ? null : () => diceModel.rollDice(sides, characterModel),
+                    style: ElevatedButton.styleFrom(backgroundColor: Colors.deepPurple),
+                    child: Text('d$sides', style: const TextStyle(fontSize: 24, color: Colors.white)),
+                  );
+                }).toList(),
+              ),
+              const SizedBox(height: 20),
+              // Results
+              AnimatedOpacity(
+                opacity: diceModel.isRolling ? 0.5 : 1.0,
+                duration: const Duration(milliseconds: 500),
+                child: Container(
+                  padding: const EdgeInsets.all(16),
+                  decoration: BoxDecoration(color: Colors.white.withOpacity(0.8), borderRadius: BorderRadius.circular(10)),
+                  child: Column(
+                    children: [
+                      Text(diceModel.isRolling ? 'Rolling...' : 'Results:', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold)),
+                      Text(diceModel.results.isEmpty ? 'Roll to see results!' : 'Rolls: ${diceModel.results.join(', ')}'),
+                      Text('Total (with mods): ${diceModel.total}'),
+                    ],
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class CharacterSheetScreen extends StatelessWidget {
+  const CharacterSheetScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    final characterModel = Provider.of<CharacterModel>(context);
+    final dbHelper = DatabaseHelper.instance;
+
+    return Scaffold(
+      appBar: AppBar(title: const Text('Character Sheet')),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          children: [
+            TextField(
+              decoration: const InputDecoration(labelText: 'Name'),
+              onChanged: (value) => characterModel.name = value,
+              controller: TextEditingController(text: characterModel.name),
+            ),
+            // Ability Scores (example for Strength, repeat for others)
+            TextField(
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'Strength'),
+              onChanged: (value) => characterModel.updateStat('strength', int.tryParse(value) ?? 10),
+              controller: TextEditingController(text: characterModel.strength.toString()),
+            ),
+            Text('Modifier: ${characterModel.getModifier(characterModel.strength)}'),
+            // Repeat for DEX, CON, INT, WIS, CHA
+            TextField(
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'Dexterity'),
+              onChanged: (value) => characterModel.updateStat('dexterity', int.tryParse(value) ?? 10),
+              controller: TextEditingController(text: characterModel.dexterity.toString()),
+            ),
+            Text('Modifier: ${characterModel.getModifier(characterModel.dexterity)}'),
+            // ... Add similar for other stats
+            TextField(
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: 'Proficiency Bonus'),
+              onChanged: (value) => characterModel.proficiencyBonus = int.tryParse(value) ?? 2,
+              controller: TextEditingController(text: characterModel.proficiencyBonus.toString()),
+            ),
+            // Skill Proficiencies (example)
+            const Text('Proficiencies:'),
+            CheckboxListTile(
+              title: const Text('Athletics (STR)'),
+              value: characterModel.skillProficiencies['Athletics'],
+              onChanged: (_) => characterModel.toggleProficiency('Athletics'),
+            ),
+            // Add more checkboxes for other skills
+            ElevatedButton(
+              onPressed: () async {
+                await dbHelper.insertOrUpdateCharacter(characterModel.toMap());
+                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Character Saved!')));
+              },
+              child: const Text('Save Character'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
